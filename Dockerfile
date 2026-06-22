@@ -54,6 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         libfreetype6 \
         libfontconfig1 \
+        fontconfig \
         fonts-dejavu-core \
     && fc-cache -f \
     && mkdir -p /opt/java-home/lib /opt/java-home/conf/fonts \
