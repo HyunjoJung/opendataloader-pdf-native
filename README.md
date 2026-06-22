@@ -55,13 +55,23 @@ docker run --rm -v "$PWD:/data" \
 
 ```dockerfile
 FROM ghcr.io/hyunjojung/opendataloader-pdf-native:2.4.7 AS pdf-native
-# ... your runtime ...
+
+FROM debian:12-slim
+# AWT/font runtime — REQUIRED, or font-path PDFs crash ("Could not allocate
+# library name"). Mirror what the published image sets up (see AWT / font support):
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libfreetype6 libfontconfig1 fonts-dejavu-core ca-certificates \
+    && fc-cache -f && mkdir -p /opt/java-home/lib /opt/java-home/conf/fonts \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=pdf-native /opt/odl /opt/odl   # native binary + JDK .so, no JVM build
-# then exec /opt/odl/odl as a subprocess
+# then exec the binary WITH the java.home stub + UTF-8 jnu encoding:
+#   /opt/odl/odl -Djava.home=/opt/java-home -Dsun.jnu.encoding=UTF-8 \
+#       --format json,markdown --image-output off --output-dir <out> <pdf>
 ```
 
 `/opt/odl/odl` accepts the same arguments as the upstream CLI
-(`org.opendataloader.pdf.cli.CLIMain`).
+(`org.opendataloader.pdf.cli.CLIMain`), but **must** be launched with
+`-Djava.home=/opt/java-home -Dsun.jnu.encoding=UTF-8` — see [AWT / font support](#awt--font-support).
 
 ## How it's built
 
@@ -88,9 +98,30 @@ arch builds on its own native runner — `linux/amd64` on an x86 runner,
   pulls the matching arch automatically.
 - The hybrid / OCR path (which calls an external backend over HTTP) is compiled
   in but not parity-verified here; if you use it, validate separately.
-- AWT/ImageIO (image extraction, annotated-PDF output) initialize at run time;
-  `libfreetype6` + `libfontconfig1` are included so those paths work, but the
-  default json/markdown path never touches AWT.
+- Requires the AWT/font runtime setup below — without it a small fraction of
+  PDFs crash the binary.
+
+## AWT / font support
+
+Even with `--image-output off`, the engine touches the AWT/font stack on some
+PDFs (font metrics for layout). Under GraalVM native-image this fatally crashes
+("Fatal error reported via JNI: Could not allocate library name") unless three
+things are in place. The published image sets all three up; **COPY-from
+consumers must replicate them**:
+
+1. **A stub `java.home`** at `/opt/java-home` (with `lib/` + `conf/fonts/`) and
+   launch with `-Djava.home=/opt/java-home`. GraalVM leaves `java.home` unset, so
+   `AWTIsHeadless()` fails and the error cascades into the misleading message
+   above. `java.home` **cannot** be baked at build time (it breaks the builder),
+   so it must be passed at runtime. (oracle/graal #7711, #9485)
+2. **At least one installed font** (`fonts-dejavu-core` + `fc-cache -f`), or
+   fontconfig reports "head is null" and the font init fails.
+3. **`-Dsun.jnu.encoding=UTF-8`** at runtime (encoding-init path, oracle/graal #8475).
+
+The build also bakes the AWT JNI config (`native-image/agent-config-awt/`:
+`System.load`, `GraphicsEnvironment.isHeadless`, `sun.java2d.Disposer`) and
+`-H:+AddAllCharsets`. The standalone image's `ENTRYPOINT` already injects
+`-Djava.home` + `-Dsun.jnu.encoding`, so `docker run` works out of the box.
 
 ## Updating the opendataloader-pdf version
 

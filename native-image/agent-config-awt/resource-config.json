@@ -1,0 +1,9 @@
+{
+  "resources":{
+  "includes":[{
+    "pattern":"\\QMETA-INF/services/java.lang.System$LoggerFinder\\E"
+  }, {
+    "pattern":"java.desktop:\\Qsun/java2d/cmm/profiles/sRGB.pf\\E"
+  }]},
+  "bundles":[]
+}

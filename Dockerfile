@@ -25,8 +25,13 @@ FROM ghcr.io/graalvm/native-image-community:21 AS build
 WORKDIR /build
 COPY --from=jar /tmp/cli.jar /build/cli.jar
 COPY native-image/agent-config /build/agent-config
+COPY native-image/agent-config-awt /build/agent-config-awt
 COPY native-image/build.sh /build/build.sh
 RUN bash /build/build.sh
+# Run the parity gate in the deployed runtime shape: fonts + java.home stub, so
+# the AWT/font path (which fatally crashes without them) is exercised as at runtime.
+RUN microdnf install -y freetype fontconfig dejavu-sans-fonts >/dev/null 2>&1 || true \
+ && mkdir -p /opt/java-home/lib /opt/java-home/conf/fonts
 COPY test /build/test
 RUN bash /build/test/parity.sh
 
@@ -38,15 +43,25 @@ LABEL org.opencontainers.image.title="opendataloader-pdf-native" \
       org.opencontainers.image.source="https://github.com/HyunjoJung/opendataloader-pdf-native" \
       org.opencontainers.image.licenses="Apache-2.0" \
       opendataloader.pdf.version="${OPENDATALOADER_PDF_VERSION}"
-# libfreetype6/libfontconfig1 let AWT load if a feature path needs it (image
-# extraction / annotated-pdf); the default json/markdown path never touches AWT.
+# Font runtime for the AWT/font path. Some PDFs make the engine touch AWT fonts
+# even with --image-output off; without this setup the native binary fatally
+# crashes ("Could not allocate library name"). Required:
+#   - fonts-dejavu-core: fontconfig needs >=1 font (else "Fontconfig head is null")
+#   - fc-cache -f:       pre-build the cache (no writable HOME needed at runtime)
+#   - /opt/java-home:    stub java.home; AWTIsHeadless needs a valid java.home,
+#                        and it cannot be baked at build time (breaks the builder)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         libfreetype6 \
         libfontconfig1 \
+        fonts-dejavu-core \
+    && fc-cache -f \
+    && mkdir -p /opt/java-home/lib /opt/java-home/conf/fonts \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt/odl /opt/odl
 COPY LICENSE NOTICE /opt/odl/
-ENTRYPOINT ["/opt/odl/odl"]
-# no args → CLIMain prints usage and exits 0
+# java.home + UTF-8 jnu encoding are set at RUNTIME (baking java.home breaks the
+# build). COPY-from consumers must replicate the font setup above AND pass these.
+ENTRYPOINT ["/opt/odl/odl", "-Djava.home=/opt/java-home", "-Dsun.jnu.encoding=UTF-8"]
+# no extra args → CLIMain prints usage and exits 0
 CMD []

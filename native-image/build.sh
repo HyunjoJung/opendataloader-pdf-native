@@ -13,7 +13,11 @@ set -euo pipefail
 
 JAR=${JAR:-/build/cli.jar}
 OUT=${OUT:-/opt/odl/odl}
-CONFIGS=${CONFIGS:-/build/agent-config}
+# Two config dirs: base parse-path config + AWT/font JNI config captured from
+# font-heavy PDFs (System.load / GraphicsEnvironment.isHeadless / Disposer).
+# The AWT config is required so font-path PDFs don't fatally crash at runtime
+# ("Could not allocate library name"). See README "AWT / font support".
+CONFIGS=${CONFIGS:-/build/agent-config,/build/agent-config-awt}
 mkdir -p "$(dirname "$OUT")"
 
 # Resource trees the veraPDF/fontbox parse path loads by name at runtime.
@@ -58,8 +62,11 @@ native-image \
   -H:+UnlockExperimentalVMOptions \
   -H:ConfigurationFileDirectories="$CONFIGS" \
   -H:+ReportExceptionStackTraces \
+  -H:+AddAllCharsets \
   -march="$MARCH" \
   -Djava.awt.headless=true \
+  -Dfile.encoding=UTF-8 \
+  -Dsun.jnu.encoding=UTF-8 \
   --enable-url-protocols=http,https \
   --initialize-at-run-time="$RUNTIME_INIT" \
   --initialize-at-build-time="$BUILD_INIT" \
