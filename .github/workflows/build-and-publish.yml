@@ -1,8 +1,13 @@
 name: build-and-publish
 
-# Builds the native-image, runs the byte-parity gate (native vs `java -jar`),
-# and publishes the runnable image to GHCR. A parity mismatch fails the build,
-# so a divergent image is never published.
+# Builds the native-image PER ARCH on a native runner — GraalVM native-image
+# AOT-compiles for the host CPU (no cross-compile, and QEMU emulation of a
+# native-image build is impractical), so amd64 builds on an x86 runner and
+# arm64 on an arm runner. Each arch runs the byte-parity gate (native vs
+# `java -jar`) inside its build and is pushed by digest; the `merge` job then
+# stitches the per-arch digests into one multi-arch manifest
+# (linux/amd64 + linux/arm64). A parity mismatch on any arch fails that arch's
+# build, so a divergent image is never published.
 
 on:
   push:
@@ -17,17 +22,31 @@ permissions:
   contents: read
   packages: write
 
+env:
+  # github.repository_owner may be mixed-case; GHCR requires lowercase. Each job
+  # re-derives the lowercase image name into IMAGE_LC (env interpolation cannot
+  # lowercase inline).
+  IMAGE: ghcr.io/${{ github.repository_owner }}/opendataloader-pdf-native
+
 jobs:
-  build-and-publish:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read version + lowercase owner (GHCR requires lowercase)
-        id: ver
+      - name: Prepare env (lowercase image, platform pair, version)
         run: |
-          echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
-          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_LC=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+          echo "PLATFORM_PAIR=$(echo '${{ matrix.platform }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          echo "VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -38,15 +57,67 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Builds through the parity-gate stage; push only happens if it passes.
-      - name: Build (incl. parity gate) + push
+      # Build through the parity-gate stage for THIS arch, then push by digest
+      # only (no tag); the merge job assembles the tagged multi-arch manifest.
+      - name: Build (incl. parity gate) + push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          platforms: ${{ matrix.platform }}
           build-args: |
-            OPENDATALOADER_PDF_VERSION=${{ steps.ver.outputs.version }}
-          tags: |
-            ghcr.io/${{ steps.ver.outputs.owner }}/opendataloader-pdf-native:${{ steps.ver.outputs.version }}
-            ghcr.io/${{ steps.ver.outputs.owner }}/opendataloader-pdf-native:latest
+            OPENDATALOADER_PDF_VERSION=${{ env.VERSION }}
           provenance: false
+          outputs: type=image,name=${{ env.IMAGE_LC }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare env (lowercase image, version)
+        run: |
+          echo "IMAGE_LC=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+          echo "VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
+
+      - name: Download per-arch digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest (:<version> + :latest)
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            -t "${IMAGE_LC}:${VERSION}" \
+            -t "${IMAGE_LC}:latest" \
+            $(printf "${IMAGE_LC}@sha256:%s " *)
+
+      - name: Inspect published manifest
+        run: docker buildx imagetools inspect "${IMAGE_LC}:${VERSION}"

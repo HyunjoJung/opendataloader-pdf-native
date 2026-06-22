@@ -39,6 +39,17 @@ RUNTIME_INIT=java.awt,java.awt.color,java.awt.image,java.awt.datatransfer,javax.
 # okhttp/kotlin/okio static state (hybrid HTTP path) is safe to fix at build time.
 BUILD_INIT=kotlin,okio,okhttp3.internal.Util
 
+# -march sets the instruction-set baseline for the build arch. native-image
+# AOT-compiles for the host (no cross-compile), so each arch builds on its own
+# runner. x86-64-v2 is the broad x86 baseline (≈all CPUs since ~2009);
+# `compatibility` is GraalVM's portable baseline, used for aarch64 (broad arm64
+# compatibility). Override per build with MARCH=… for a specific microarch.
+case "$(uname -m)" in
+  x86_64 | amd64) MARCH=${MARCH:-x86-64-v2} ;;
+  aarch64 | arm64) MARCH=${MARCH:-compatibility} ;;
+  *) MARCH=${MARCH:-compatibility} ;;
+esac
+
 set -x
 native-image \
   -jar "$JAR" \
@@ -47,7 +58,7 @@ native-image \
   -H:+UnlockExperimentalVMOptions \
   -H:ConfigurationFileDirectories="$CONFIGS" \
   -H:+ReportExceptionStackTraces \
-  -march=x86-64-v2 \
+  -march="$MARCH" \
   -Djava.awt.headless=true \
   --enable-url-protocols=http,https \
   --initialize-at-run-time="$RUNTIME_INIT" \

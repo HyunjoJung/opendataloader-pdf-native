@@ -2,7 +2,8 @@
 
 A **JVM-free** GraalVM native-image build of the
 [opendataloader-pdf](https://github.com/opendataloader-project/opendataloader-pdf)
-CLI, published as a public container image.
+CLI, published as a public, **multi-arch** (`linux/amd64` + `linux/arm64`)
+container image.
 
 > **Unofficial.** Not affiliated with, endorsed by, or supported by the
 > opendataloader project or Hancom Inc. See [NOTICE](NOTICE) for attribution.
@@ -32,7 +33,9 @@ The native binary must produce **byte-for-byte identical** JSON and Markdown to
 consumers parse the reconstructed tables — any divergence silently corrupts
 them). Every build runs a **parity gate** (`test/parity.sh`): it runs both
 engines over the test PDFs and fails the build on any mismatch, so a divergent
-image is never published.
+image is never published. The gate runs on **each arch's** native build (arm64
+native vs arm64 `java -jar`, and likewise for amd64), so neither arch can ship a
+binary that diverges from the JVM reference on that arch.
 
 > The parity gate uses generic English table/heading PDFs. If your workload has
 > language- or font-specific content (e.g. Korean CMaps), re-verify parity on a
@@ -69,13 +72,20 @@ COPY --from=pdf-native /opt/odl /opt/odl   # native binary + JDK .so, no JVM bui
    collected with the native-image tracing agent (`native-image/agent-config/`).
    The engine uses veraPDF's low-level parser (not its reflective validation
    model), so the reflection surface is tiny.
-3. The parity gate runs; on success the image is published to GHCR.
+3. The parity gate runs; on success the per-arch image is pushed by digest.
+4. The per-arch digests are stitched into one **multi-arch manifest**
+   (`:<version>` + `:latest`) and published to GHCR.
 
-`-march=x86-64-v2` is used for broad x86-64 compatibility.
+native-image AOT-compiles for the build host's CPU (no cross-compile), so each
+arch builds on its own native runner — `linux/amd64` on an x86 runner,
+`linux/arm64` on an arm runner. The instruction-set baseline is chosen per arch:
+`-march=x86-64-v2` on x86-64 (broad compatibility) and `-march=compatibility`
+(GraalVM's portable baseline) on aarch64.
 
 ## Notes / limitations
 
-- Built for **linux/amd64** only.
+- Published as a **multi-arch manifest** (`linux/amd64` + `linux/arm64`); Docker
+  pulls the matching arch automatically.
 - The hybrid / OCR path (which calls an external backend over HTTP) is compiled
   in but not parity-verified here; if you use it, validate separately.
 - AWT/ImageIO (image extraction, annotated-PDF output) initialize at run time;
