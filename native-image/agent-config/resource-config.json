@@ -1,0 +1,21 @@
+{
+  "resources":{
+  "includes":[{
+    "pattern":"\\QMETA-INF/services/java.lang.System$LoggerFinder\\E"
+  }, {
+    "pattern":"\\QMETA-INF/services/javax.xml.parsers.DocumentBuilderFactory\\E"
+  }, {
+    "pattern":"\\Qfont/AdobeGlyphList.txt\\E"
+  }, {
+    "pattern":"\\Qfont/cmap/Adobe-WinCharSetFFFF-UCS2\\E"
+  }, {
+    "pattern":"\\Qfont/cmap/Identity-H\\E"
+  }, {
+    "pattern":"\\Qfont/cmap/KSC-EUC-H\\E"
+  }, {
+    "pattern":"\\Qfont/stdmetrics/Helvetica-BoldOblique.afm\\E"
+  }, {
+    "pattern":"\\Qfont/stdmetrics/Helvetica.afm\\E"
+  }]},
+  "bundles":[]
+}

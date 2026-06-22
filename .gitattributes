@@ -1,0 +1,4 @@
+# Force LF for everything text — these scripts/configs run inside Linux images.
+* text=auto eol=lf
+*.sh text eol=lf
+*.pdf binary

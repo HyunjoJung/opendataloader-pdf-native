@@ -1,0 +1,23 @@
+opendataloader-pdf-native
+Copyright 2026 Hyunjo Jung
+
+This is an UNOFFICIAL GraalVM native-image build of the opendataloader-pdf CLI.
+It is not affiliated with, endorsed by, or supported by the opendataloader
+project or Hancom Inc.
+
+This product bundles and redistributes a compiled form of:
+
+  opendataloader-pdf
+  Copyright 2025-2026 Hancom Inc.
+  Licensed under the Apache License, Version 2.0
+  https://github.com/opendataloader-project/opendataloader-pdf
+
+The opendataloader-pdf shaded JAR (and therefore the native binary built from
+it) includes third-party components under their respective licenses; their
+LICENSE/NOTICE files are retained inside the JAR's META-INF and carried into the
+binary. Notable components include Apache PDFBox/FontBox, veraPDF, Jackson,
+OkHttp/Okio, Kotlin stdlib, and Apache Commons CLI.
+
+No source code of opendataloader-pdf is modified or redistributed by this
+repository; the build fetches the published artifact (via the pip wheel) and
+compiles it ahead-of-time with GraalVM native-image.

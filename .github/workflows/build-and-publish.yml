@@ -1,0 +1,52 @@
+name: build-and-publish
+
+# Builds the native-image, runs the byte-parity gate (native vs `java -jar`),
+# and publishes the runnable image to GHCR. A parity mismatch fails the build,
+# so a divergent image is never published.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-and-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version + lowercase owner (GHCR requires lowercase)
+        id: ver
+        run: |
+          echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Builds through the parity-gate stage; push only happens if it passes.
+      - name: Build (incl. parity gate) + push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            OPENDATALOADER_PDF_VERSION=${{ steps.ver.outputs.version }}
+          tags: |
+            ghcr.io/${{ steps.ver.outputs.owner }}/opendataloader-pdf-native:${{ steps.ver.outputs.version }}
+            ghcr.io/${{ steps.ver.outputs.owner }}/opendataloader-pdf-native:latest
+          provenance: false
