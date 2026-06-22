@@ -1,26 +1,36 @@
 name: build-and-publish
 
-# Builds the native-image PER ARCH on a native runner — GraalVM native-image
-# AOT-compiles for the host CPU (no cross-compile, and QEMU emulation of a
-# native-image build is impractical), so amd64 builds on an x86 runner and
-# arm64 on an arm runner. Each arch runs the byte-parity gate (native vs
-# `java -jar`) inside its build and is pushed by digest; the `merge` job then
-# stitches the per-arch digests into one multi-arch manifest
+# Builds the opendataloader-pdf native-image PER ARCH on a native runner —
+# native-image AOT-compiles for the host CPU (no cross-compile, and QEMU
+# emulation of a native-image build is impractical), so amd64 builds on an x86
+# runner and arm64 on an arm runner. Each arch runs the byte-parity gate
+# (native vs `java -jar`) inside its build and is pushed by digest; the `merge`
+# job stitches the per-arch digests into one multi-arch manifest
 # (linux/amd64 + linux/arm64). A parity mismatch on any arch fails that arch's
 # build, so a divergent image is never published.
+#
+# Version source:
+#   - push / workflow_dispatch → the pinned VERSION file.
+#   - schedule (daily)         → the latest STABLE opendataloader-pdf on PyPI.
+#     If it is newer than VERSION, this run builds + publishes it UNATTENDED and
+#     then commits the VERSION bump — but only AFTER a successful publish, so
+#     VERSION always reflects what is actually on GHCR (a build that fails the
+#     parity gate publishes nothing and is retried on the next schedule).
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * *" # daily — track upstream releases unattended
 
 concurrency:
   group: build-and-publish
   cancel-in-progress: false
 
 permissions:
-  contents: read
-  packages: write
+  contents: write # commit the VERSION bump after a scheduled publish
+  packages: write # push images to GHCR
 
 env:
   # github.repository_owner may be mixed-case; GHCR requires lowercase. Each job
@@ -29,7 +39,42 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/opendataloader-pdf-native
 
 jobs:
+  # Decide which opendataloader-pdf version to build and whether to proceed.
+  # On schedule the target is the latest stable upstream release; skip when it
+  # already equals the pinned VERSION (nothing new to publish).
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      proceed: ${{ steps.v.outputs.proceed }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          current="$(tr -d '[:space:]' < VERSION)"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # Latest STABLE release on PyPI (with dists, excluding pre-releases).
+            latest="$(curl -fsSL https://pypi.org/pypi/opendataloader-pdf/json \
+              | jq -r '.releases | to_entries[] | select(.value | length > 0) | .key | select(test("^[0-9]+(\\.[0-9]+)+$"))' \
+              | sort -V | tail -1)"
+            [ -n "$latest" ] || { echo "could not resolve latest upstream version"; exit 1; }
+            echo "version=$latest" >> "$GITHUB_OUTPUT"
+            if [ "$latest" = "$current" ]; then
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              echo "Up to date: $current is the latest stable upstream release."
+            else
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+              echo "New upstream release: $current -> $latest"
+            fi
+          else
+            echo "version=$current" >> "$GITHUB_OUTPUT"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "Building pinned VERSION: $current"
+          fi
+
   build:
+    needs: resolve
+    if: needs.resolve.outputs.proceed == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -42,11 +87,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare env (lowercase image, platform pair, version)
+      - name: Prepare env (lowercase image, platform pair)
         run: |
           echo "IMAGE_LC=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
           echo "PLATFORM_PAIR=$(echo '${{ matrix.platform }}' | tr '/' '-')" >> "$GITHUB_ENV"
-          echo "VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -66,7 +110,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           build-args: |
-            OPENDATALOADER_PDF_VERSION=${{ env.VERSION }}
+            OPENDATALOADER_PDF_VERSION=${{ needs.resolve.outputs.version }}
           provenance: false
           outputs: type=image,name=${{ env.IMAGE_LC }},push-by-digest=true,name-canonical=true,push=true
 
@@ -85,15 +129,11 @@ jobs:
           retention-days: 1
 
   merge:
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Prepare env (lowercase image, version)
-        run: |
-          echo "IMAGE_LC=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
-          echo "VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
+      - name: Prepare env (lowercase image)
+        run: echo "IMAGE_LC=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       - name: Download per-arch digests
         uses: actions/download-artifact@v4
@@ -113,6 +153,8 @@ jobs:
 
       - name: Create multi-arch manifest (:<version> + :latest)
         working-directory: ${{ runner.temp }}/digests
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           docker buildx imagetools create \
             -t "${IMAGE_LC}:${VERSION}" \
@@ -120,4 +162,29 @@ jobs:
             $(printf "${IMAGE_LC}@sha256:%s " *)
 
       - name: Inspect published manifest
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: docker buildx imagetools inspect "${IMAGE_LC}:${VERSION}"
+
+  # Persist the bump ONLY after a successful scheduled publish, so VERSION always
+  # matches what is on GHCR. The GITHUB_TOKEN push does not retrigger this
+  # workflow (no double run); the next scheduled run then sees it as current.
+  bump-version:
+    needs: [resolve, merge]
+    if: github.event_name == 'schedule' && needs.resolve.outputs.proceed == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Commit VERSION bump
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          echo "$VERSION" > VERSION
+          if git diff --quiet; then
+            echo "VERSION already $VERSION — nothing to commit."
+            exit 0
+          fi
+          git config user.name "joe"
+          git config user.email "mrjung0987@seoultech.ac.kr"
+          git commit -am "chore: track upstream opendataloader-pdf ${VERSION}"
+          git push

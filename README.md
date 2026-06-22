@@ -94,8 +94,17 @@ arch builds on its own native runner — `linux/amd64` on an x86 runner,
 
 ## Updating the opendataloader-pdf version
 
-Bump [`VERSION`](VERSION) and push to `main`; the workflow builds, runs the
-parity gate, and publishes `:<version>` and `:latest`.
+The build workflow **tracks upstream automatically**: a daily scheduled run
+checks PyPI for the latest stable `opendataloader-pdf`, and if it is newer than
+[`VERSION`](VERSION) it builds + publishes that version **unattended**, then
+commits the bump. The publish only happens *after* the per-arch parity gate
+passes — a release that diverges from `java -jar` fails the build and is never
+published (and is retried on the next run) — so this is safe to leave running on
+its own.
+
+To pin, downgrade, or force a specific version by hand, edit
+[`VERSION`](VERSION) and push to `main` (or trigger the workflow via
+`workflow_dispatch`).
 
 ## License
 
