@@ -28,10 +28,32 @@ COPY native-image/agent-config /build/agent-config
 COPY native-image/agent-config-awt /build/agent-config-awt
 COPY native-image/build.sh /build/build.sh
 RUN bash /build/build.sh
-# Run the parity gate in the deployed runtime shape: fonts + java.home stub, so
-# the AWT/font path (which fatally crashes without them) is exercised as at runtime.
-RUN microdnf install -y freetype fontconfig dejavu-sans-fonts >/dev/null 2>&1 || true \
- && mkdir -p /opt/java-home/lib /opt/java-home/conf/fonts
+# Make /opt/odl SELF-CONTAINED: bundle a stub java.home + fonts + a fontconfig
+# config + a wrapper that sets -Djava.home / FONTCONFIG_FILE relative to its own
+# dir. Then ANY consumer (the publish image OR a COPY-from sidecar) just runs
+# /opt/odl/odl with no extra setup beyond libfreetype6/libfontconfig1. The parity
+# gate below exercises this real wrapper. (freetype/fontconfig libs + dejavu here
+# are only to source fonts and let the gate run.)
+RUN microdnf install -y freetype fontconfig dejavu-sans-fonts findutils >/dev/null 2>&1 || true
+RUN set -eux; \
+    mv /opt/odl/odl /opt/odl/odl.bin; \
+    mkdir -p /opt/odl/java-home/lib /opt/odl/java-home/conf/fonts /opt/odl/fonts /opt/odl/fontconfig; \
+    find /usr/share/fonts -iname '*.ttf' -exec cp -n {} /opt/odl/fonts/ \; ; \
+    [ -n "$(ls -A /opt/odl/fonts)" ] || { echo 'FATAL: no fonts bundled into /opt/odl/fonts'; exit 1; }; \
+    { echo '<?xml version="1.0"?>'; \
+      echo '<fontconfig>'; \
+      echo '  <dir>/opt/odl/fonts</dir>'; \
+      echo '  <dir>/usr/share/fonts</dir>'; \
+      echo '  <cachedir>/tmp/.fontconfig</cachedir>'; \
+      echo '</fontconfig>'; } > /opt/odl/fontconfig/fonts.conf; \
+    { echo '#!/bin/sh'; \
+      echo '# Self-contained launcher: stub java.home + bundled fontconfig,'; \
+      echo '# relative to this dir, so the AWT/font path works with only'; \
+      echo '# libfreetype6/libfontconfig1 present. See README (AWT / font support).'; \
+      echo 'HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"'; \
+      echo 'export FONTCONFIG_FILE="$HERE/fontconfig/fonts.conf"'; \
+      echo 'exec "$HERE/odl.bin" -Djava.home="$HERE/java-home" -Dsun.jnu.encoding=UTF-8 "$@"'; } > /opt/odl/odl; \
+    chmod +x /opt/odl/odl
 COPY test /build/test
 RUN bash /build/test/parity.sh
 
@@ -43,26 +65,19 @@ LABEL org.opencontainers.image.title="opendataloader-pdf-native" \
       org.opencontainers.image.source="https://github.com/HyunjoJung/opendataloader-pdf-native" \
       org.opencontainers.image.licenses="Apache-2.0" \
       opendataloader.pdf.version="${OPENDATALOADER_PDF_VERSION}"
-# Font runtime for the AWT/font path. Some PDFs make the engine touch AWT fonts
-# even with --image-output off; without this setup the native binary fatally
-# crashes ("Could not allocate library name"). Required:
-#   - fonts-dejavu-core: fontconfig needs >=1 font (else "Fontconfig head is null")
-#   - fc-cache -f:       pre-build the cache (no writable HOME needed at runtime)
-#   - /opt/java-home:    stub java.home; AWTIsHeadless needs a valid java.home,
-#                        and it cannot be baked at build time (breaks the builder)
+# Only the two shared libs the native binary dlopens for the AWT/font path.
+# Fonts + java.home stub + fontconfig config + the launcher are bundled INSIDE
+# /opt/odl by the build stage, so no fonts/fontconfig packages are needed and
+# COPY-from consumers need only these two libs (see README, AWT / font support).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         libfreetype6 \
         libfontconfig1 \
-        fontconfig \
-        fonts-dejavu-core \
-    && fc-cache -f \
-    && mkdir -p /opt/java-home/lib /opt/java-home/conf/fonts \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt/odl /opt/odl
 COPY LICENSE NOTICE /opt/odl/
-# java.home + UTF-8 jnu encoding are set at RUNTIME (baking java.home breaks the
-# build). COPY-from consumers must replicate the font setup above AND pass these.
-ENTRYPOINT ["/opt/odl/odl", "-Djava.home=/opt/java-home", "-Dsun.jnu.encoding=UTF-8"]
+# /opt/odl/odl is the self-contained launcher (sets -Djava.home / FONTCONFIG_FILE
+# relative to itself). Consumers just run it — no -D flags, no font setup.
+ENTRYPOINT ["/opt/odl/odl"]
 # no extra args → CLIMain prints usage and exits 0
 CMD []

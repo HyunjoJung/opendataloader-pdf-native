@@ -57,21 +57,20 @@ docker run --rm -v "$PWD:/data" \
 FROM ghcr.io/hyunjojung/opendataloader-pdf-native:2.4.7 AS pdf-native
 
 FROM debian:12-slim
-# AWT/font runtime — REQUIRED, or font-path PDFs crash ("Could not allocate
-# library name"). Mirror what the published image sets up (see AWT / font support):
+# /opt/odl is self-contained (bundled fonts + java.home stub + launcher). A
+# consumer only needs the two shared libs the binary dlopens for the font path:
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libfreetype6 libfontconfig1 fonts-dejavu-core ca-certificates \
-    && fc-cache -f && mkdir -p /opt/java-home/lib /opt/java-home/conf/fonts \
+        libfreetype6 libfontconfig1 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=pdf-native /opt/odl /opt/odl   # native binary + JDK .so, no JVM build
-# then exec the binary WITH the java.home stub + UTF-8 jnu encoding:
-#   /opt/odl/odl -Djava.home=/opt/java-home -Dsun.jnu.encoding=UTF-8 \
-#       --format json,markdown --image-output off --output-dir <out> <pdf>
+COPY --from=pdf-native /opt/odl /opt/odl   # binary + JDK .so + fonts + stub + launcher
+# then just run the launcher — no -D flags, no font setup:
+#   /opt/odl/odl --format json,markdown --image-output off --output-dir <out> <pdf>
 ```
 
-`/opt/odl/odl` accepts the same arguments as the upstream CLI
-(`org.opendataloader.pdf.cli.CLIMain`), but **must** be launched with
-`-Djava.home=/opt/java-home -Dsun.jnu.encoding=UTF-8` — see [AWT / font support](#awt--font-support).
+`/opt/odl/odl` is a self-contained launcher: it sets `-Djava.home` /
+`FONTCONFIG_FILE` relative to its own dir, then execs the native binary
+(`/opt/odl/odl.bin`) with the upstream CLI args
+(`org.opendataloader.pdf.cli.CLIMain`). See [AWT / font support](#awt--font-support).
 
 ## How it's built
 
@@ -98,30 +97,32 @@ arch builds on its own native runner — `linux/amd64` on an x86 runner,
   pulls the matching arch automatically.
 - The hybrid / OCR path (which calls an external backend over HTTP) is compiled
   in but not parity-verified here; if you use it, validate separately.
-- Requires the AWT/font runtime setup below — without it a small fraction of
-  PDFs crash the binary.
+- Self-contained: needs only `libfreetype6` + `libfontconfig1` at runtime;
+  everything else for the AWT/font path is bundled in `/opt/odl` (see below).
 
 ## AWT / font support
 
 Even with `--image-output off`, the engine touches the AWT/font stack on some
 PDFs (font metrics for layout). Under GraalVM native-image this fatally crashes
 ("Fatal error reported via JNI: Could not allocate library name") unless three
-things are in place. The published image sets all three up; **COPY-from
-consumers must replicate them**:
+things are in place — and **the launcher `/opt/odl/odl` provides all three
+itself**, so neither `docker run` nor a COPY-from consumer configures anything:
 
-1. **A stub `java.home`** at `/opt/java-home` (with `lib/` + `conf/fonts/`) and
-   launch with `-Djava.home=/opt/java-home`. GraalVM leaves `java.home` unset, so
-   `AWTIsHeadless()` fails and the error cascades into the misleading message
-   above. `java.home` **cannot** be baked at build time (it breaks the builder),
-   so it must be passed at runtime. (oracle/graal #7711, #9485)
-2. **At least one installed font** (`fonts-dejavu-core` + `fc-cache -f`), or
-   fontconfig reports "head is null" and the font init fails.
-3. **`-Dsun.jnu.encoding=UTF-8`** at runtime (encoding-init path, oracle/graal #8475).
+1. **A stub `java.home`** (bundled at `/opt/odl/java-home`), passed via
+   `-Djava.home`. GraalVM leaves `java.home` unset, so `AWTIsHeadless()` fails and
+   the error cascades into the misleading message above. It **cannot** be baked at
+   build time (breaks the builder), so the launcher sets it at runtime.
+   (oracle/graal #7711, #9485)
+2. **Fonts** — DejaVu is bundled at `/opt/odl/fonts`, exposed via a bundled
+   `FONTCONFIG_FILE` (`/opt/odl/fontconfig/fonts.conf`, cache in `/tmp`). Without
+   ≥1 font, fontconfig reports "head is null" and font init fails. No system
+   fonts or `fc-cache` needed.
+3. **`-Dsun.jnu.encoding=UTF-8`** (encoding-init path, oracle/graal #8475).
 
 The build also bakes the AWT JNI config (`native-image/agent-config-awt/`:
 `System.load`, `GraphicsEnvironment.isHeadless`, `sun.java2d.Disposer`) and
-`-H:+AddAllCharsets`. The standalone image's `ENTRYPOINT` already injects
-`-Djava.home` + `-Dsun.jnu.encoding`, so `docker run` works out of the box.
+`-H:+AddAllCharsets`. The only thing a consumer provides is the two shared libs
+the binary dlopens: `libfreetype6` + `libfontconfig1`.
 
 ## Updating the opendataloader-pdf version
 
